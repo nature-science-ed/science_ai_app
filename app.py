@@ -7,111 +7,62 @@ import io
 import base64
 from openai import OpenAI
 
-# --- 1. ページ設定 ---
 st.set_page_config(page_title="AI Reflection Analyzer", layout="wide")
 st.title("🔬 AIリフレクション・アナライザー")
-st.write("アンケート結果を可視化し、AIがねらいに対する達成度を評価します。")
 
-# --- 2. API設定 (Secretsから自動読み込み) ---
+# API設定
 try:
-    # さきほどSecretsに保存した "OPENAI_API_KEY" を呼び出します
     client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 except Exception:
-    st.error("APIキーが設定されていません。Streamlit CloudのSettings > Secretsを確認してください。")
+    st.error("SecretsにAPIキーが見つかりません。")
     st.stop()
 
-# --- 3. サイドバー設定 ---
-st.sidebar.header("📋 行事のねらい設定")
+# サイドバー
 goal_1 = st.sidebar.text_area("ねらい1", "最先端の科学研究に触れ、興味・関心を高める。")
 goal_2 = st.sidebar.text_area("ねらい2", "大学での学びを知り、将来の進路について考えるきっかけとする。")
 
 t = Tokenizer()
 
-# --- 4. 単語抽出エンジンの定義 ---
 def extract_words(text):
     words = []
-    # 思考力や感情を捉えるための単語リスト
-    feeling_words = ["思う", "感じる", "考える", "知る", "驚く", "わかる", "面白い", "楽しい", "凄い", "不思議", "納得"]
-    
+    feel = ["思う", "感じる", "考える", "知る", "驚く", "わかる", "面白い", "楽しい", "凄い", "不思議"]
     for token in t.tokenize(str(text)):
         part = token.part_of_speech.split(",")[0]
         base = token.base_form
-        # 名詞（2文字以上）または指定した感情語を抽出
-        if (part == "名詞" and len(base) >= 2) or (base in feeling_words):
+        if (part == "名詞" and len(base) >= 2) or (base in feel):
             words.append(base)
     return " ".join(words)
 
-# --- 5. メイン処理：ファイルアップロード ---
-uploaded_file = st.file_uploader("エクセルまたはCSVファイルをアップロードしてください", type=["xlsx", "csv"])
+uploaded_file = st.file_uploader("エクセル/CSVをアップロード", type=["xlsx", "csv"])
 
 if uploaded_file is not None:
-    # データの読み込み
-    if uploaded_file.name.endswith('.csv'):
-        df = pd.read_csv(uploaded_file)
-    else:
-        df = pd.read_excel(uploaded_file)
+    df = pd.read_csv(uploaded_file) if uploaded_file.name.endswith('.csv') else pd.read_excel(uploaded_file)
+    target_col = st.selectbox("分析列を選択", df.columns)
     
-    target_col = st.selectbox("分析したい感想の列を選択してください", df.columns)
-    
-    if st.button("AIによる分析と詳細評価を実行"):
-        with st.spinner("ワードクラウドを生成し、AIが画像を分析しています..."):
-            # 5-1. テキスト処理とワードクラウド生成
+    if st.button("AI詳細分析を実行"):
+        with st.spinner("AIが画像とテキストを分析中..."):
             all_text = "\n".join(df[target_col].dropna().astype(str))
             wakati = extract_words(all_text)
             
-            # フォント設定（Streamlit Cloudの標準パス）
+            # 画像作成
             FONT_PATH = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
-            wc = WordCloud(font_path=FONT_PATH, background_color="white", width=1200, height=600).generate(wakati)
-            
-            # 画像をバイトデータに変換（AI送信用）
+            wc = WordCloud(font_path=FONT_PATH, background_color="white", width=1000, height=500).generate(wakati)
             img_buf = io.BytesIO()
             wc.to_image().save(img_buf, format='PNG')
             img_bytes = img_buf.getvalue()
             
-            # 結果の表示
-            st.subheader("📊 分析結果：ワードクラウド")
-            st.image(img_bytes, use_container_width=True)
+            # 画像表示
+            st.image(img_bytes)
 
-            # 5-2. OpenAI (GPT-4o) による画像分析評価
-            # 画像をAIが読める形式（Base64）にエンコード
+            # AI評価
             base64_image = base64.b64encode(img_bytes).decode('utf-8')
-            
-            prompt = f"""
-あなたは中学校の理科教師として，提供された「ワードクラウド画像」を分析し，以下の2つの「ねらい」に対する達成度を詳細に評価してください。
-
-【ねらい1】
-{goal_1}
-
-【ねらい2】
-{goal_2}
-
-### 出力ルール
-1. 各ねらいに対して，達成度を S, A, B, C の4段階で判定する。
-2. 判定の根拠を，画像内で大きく表示されている語彙（事実）や，その周囲にある語彙（感情・思考）を具体的に引用しながら説明する。
-3. 今後の事後指導や，生徒へのフィードバックに活かせるアドバイスを添える。
-4. 文章はすべて日本語で，教師が報告書や所見にそのまま活用できるような，専門的かつ温かみのある表現にする。
-"""
-
             response = client.chat.completions.create(
                 model="gpt-4o",
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": prompt},
-                            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{base64_image}"}}
-                        ],
-                    }
-                ],
-                max_tokens=1500,
+                messages=[{"role": "user", "content": [
+                    {"type": "text", "text": f"このワードクラウド画像を中学校教師の視点で分析し、次の『ねらい』への達成度を評価して下さい。1:{goal_1} 2:{goal_2}"},
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{base64_image}"}}
+                ]}]
             )
-            
-            # AI評価の表示
-            st.divider()
-            st.subheader("📝 AIによる達成度評価レポート")
+            st.write("---")
+            st.header("📝 AI評価レポート")
             st.markdown(response.choices[0].message.content)
-            
-            # ダウンロードボタン
-            st.download_button("分析画像を保存", data=img_bytes, file_name="reflection_cloud.png")
-
-        st.success("分析が完了しました。")
