@@ -1,68 +1,117 @@
 import streamlit as st
+import pandas as pd
+from janome.tokenizer import Tokenizer
+from wordcloud import WordCloud
+import matplotlib.pyplot as plt
+import io
+import base64
 from openai import OpenAI
-import os
-from dotenv import load_dotenv
 
-load_dotenv()
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+# --- 1. ページ設定 ---
+st.set_page_config(page_title="AI Reflection Analyzer", layout="wide")
+st.title("🔬 AIリフレクション・アナライザー")
+st.write("アンケート結果を可視化し、AIがねらいに対する達成度を評価します。")
 
-st.title("思考力アシスタント")
-st.write("記述式の答えに対して助言を返して、正しい考え方に近づけるアプリです。")
+# --- 2. API設定 (Secretsから自動読み込み) ---
+try:
+    # さきほどSecretsに保存した "OPENAI_API_KEY" を呼び出します
+    client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+except Exception:
+    st.error("APIキーが設定されていません。Streamlit CloudのSettings > Secretsを確認してください。")
+    st.stop()
 
-question = st.text_area("質問（記述式）を入力してください")
-student_answer = st.text_area("回答を入力してください")
+# --- 3. サイドバー設定 ---
+st.sidebar.header("📋 行事のねらい設定")
+goal_1 = st.sidebar.text_area("ねらい1", "最先端の科学研究に触れ、興味・関心を高める。")
+goal_2 = st.sidebar.text_area("ねらい2", "大学での学びを知り、将来の進路について考えるきっかけとする。")
 
-if st.button("アドバイスをもらう"):
-    if not question or not student_answer:
-        st.warning("質問と回答の両方を入力してください。")
+t = Tokenizer()
+
+# --- 4. 単語抽出エンジンの定義 ---
+def extract_words(text):
+    words = []
+    # 思考力や感情を捉えるための単語リスト
+    feeling_words = ["思う", "感じる", "考える", "知る", "驚く", "わかる", "面白い", "楽しい", "凄い", "不思議", "納得"]
+    
+    for token in t.tokenize(str(text)):
+        part = token.part_of_speech.split(",")[0]
+        base = token.base_form
+        # 名詞（2文字以上）または指定した感情語を抽出
+        if (part == "名詞" and len(base) >= 2) or (base in feeling_words):
+            words.append(base)
+    return " ".join(words)
+
+# --- 5. メイン処理：ファイルアップロード ---
+uploaded_file = st.file_uploader("エクセルまたはCSVファイルをアップロードしてください", type=["xlsx", "csv"])
+
+if uploaded_file is not None:
+    # データの読み込み
+    if uploaded_file.name.endswith('.csv'):
+        df = pd.read_csv(uploaded_file)
     else:
-        prompt = f"""
-あなたは中学生向け理科の指導アシスタントです。
-以下の問題文と生徒の解答を読み，解答の質を次の3つのどれかに分類して下さい。
+        df = pd.read_excel(uploaded_file)
+    
+    target_col = st.selectbox("分析したい感想の列を選択してください", df.columns)
+    
+    if st.button("AIによる分析と詳細評価を実行"):
+        with st.spinner("ワードクラウドを生成し、AIが画像を分析しています..."):
+            # 5-1. テキスト処理とワードクラウド生成
+            all_text = "\n".join(df[target_col].dropna().astype(str))
+            wakati = extract_words(all_text)
+            
+            # フォント設定（Streamlit Cloudの標準パス）
+            FONT_PATH = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
+            wc = WordCloud(font_path=FONT_PATH, background_color="white", width=1200, height=600).generate(wakati)
+            
+            # 画像をバイトデータに変換（AI送信用）
+            img_buf = io.BytesIO()
+            wc.to_image().save(img_buf, format='PNG')
+            img_bytes = img_buf.getvalue()
+            
+            # 結果の表示
+            st.subheader("📊 分析結果：ワードクラウド")
+            st.image(img_bytes, use_container_width=True)
 
-S: 中学生レベルとして十分に正しく、その中でも特に優れている。
-A: 中学生レベルとして十分に正しい。
-B: 大筋はよいが，説明があいまい／一部が抜けている。
-C: 重要な部分で誤解や間違いがある。
+            # 5-2. OpenAI (GPT-4o) による画像分析評価
+            # 画像をAIが読める形式（Base64）にエンコード
+            base64_image = base64.b64encode(img_bytes).decode('utf-8')
+            
+            prompt = f"""
+あなたは中学校の理科教師として，提供された「ワードクラウド画像」を分析し，以下の2つの「ねらい」に対する達成度を詳細に評価してください。
 
-【問題】
-{question}
+【ねらい1】
+{goal_1}
 
-【生徒の考え】
-{student_answer}
+【ねらい2】
+{goal_2}
 
 ### 出力ルール
-1. 1行目で必ず「判定：S」「判定：A」「判定：B」「判定：C」のどれかを書く。
-
-2. 2行目以降で助言を書く。
-   - 判定Sのとき：
-     - 中学生レベルとして十分に良いことをはっきり伝える。
-     - 良い点を1〜2個ほめる。
-     - 必要なら1〜2文だけ簡単な補足，さらに考えるための一言を添える。
-
-   - 判定Aのとき：
-     - 中学生レベルとして十分に良いことをはっきり伝える。
-     - 良い点を1〜2個ほめる。
-     - 必要なら1〜2文だけ簡単な補足，さらに考えるための一言を添える。
-
-   - 判定BまたはCのとき：
-     - まず良い点を1つ以上ほめる。
-     - どこを直すとよくなるかを，中学生にも分かる言葉でやさしく伝える。
-     - 次の一歩として，何を考えたり調べたりするとよいかの1〜3個提案する。
-
-3. 正解そのものは直接書かない。
-4. 文章はすべて日本語で，中学生にも読みやすい表現にする。
+1. 各ねらいに対して，達成度を S, A, B, C の4段階で判定する。
+2. 判定の根拠を，画像内で大きく表示されている語彙（事実）や，その周囲にある語彙（感情・思考）を具体的に引用しながら説明する。
+3. 今後の事後指導や，生徒へのフィードバックに活かせるアドバイスを添える。
+4. 文章はすべて日本語で，教師が報告書や所見にそのまま活用できるような，専門的かつ温かみのある表現にする。
 """
 
-        response = client.responses.create(
-            model="gpt-4.1-mini",
-            input=prompt,
-        )
-        ai_message = response.output_text
+            response = client.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{base64_image}"}}
+                        ],
+                    }
+                ],
+                max_tokens=1500,
+            )
+            
+            # AI評価の表示
+            st.divider()
+            st.subheader("📝 AIによる達成度評価レポート")
+            st.markdown(response.choices[0].message.content)
+            
+            # ダウンロードボタン
+            st.download_button("分析画像を保存", data=img_bytes, file_name="reflection_cloud.png")
 
-        st.subheader("アドバイス：")
-        st.write(ai_message)
-
-
-
-
+        st.success("分析が完了しました。")
